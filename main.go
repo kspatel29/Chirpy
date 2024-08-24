@@ -1,109 +1,49 @@
 package main
 
 import (
-	"encoding/json"
+	"log"
 	"net/http"
-	"strings"
 
 	"github.com/kspatel29/chirpy/internal/database"
 )
 
-var (
-        profaneWords = []string{
-                "kerfuffle",
-                "sharbert",
-                "fornax",
-        }
-)
+type apiConfig struct {
+	fileserverHits int
+	DB             *database.DB
+}
 
 func main() {
-        db, err := database.NewDB("database.json")
-        if err != nil {
-                panic(err)
-        }
+	const filepathRoot = "."
+	const port = "8080"
 
-        mux := http.NewServeMux()
+	db, err := database.NewDB("database.json")
+	if err != nil {
+		log.Fatal(err)
+	}
 
-        mux.HandleFunc("/api/chirps", func(w http.ResponseWriter, r *http.Request) {
-                switch r.Method {
-                case http.MethodPost:
-                        handleCreateChirp(w, r, db)
-                case http.MethodGet:
-                        handleGetChirps(w, r, db)
-                default:
-                        http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-                }
-        })
+	apiCfg := apiConfig{
+		fileserverHits: 0,
+		DB:             db,
+	}
 
-        server := &http.Server{
-                Addr:    ":8080",
-                Handler: mux,
-        }
+	mux := http.NewServeMux()
+	fsHandler := apiCfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(filepathRoot))))
+	mux.Handle("/app/*", fsHandler)
 
-        if err := server.ListenAndServe(); err != nil {
-                panic(err)
-        }
-}
+	mux.HandleFunc("GET /api/healthz", handlerReadiness)
+	mux.HandleFunc("GET /api/reset", apiCfg.handlerReset)
+	mux.HandleFunc("POST /api/users", apiCfg.handlerUsersCreate)
+	mux.HandleFunc("POST /api/chirps", apiCfg.handlerChirpsCreate)
+	mux.HandleFunc("GET /api/chirps", apiCfg.handlerChirpsRetrieve)
+	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.handlerChirpsGet)
 
-func handleCreateChirp(w http.ResponseWriter, r *http.Request, db *database.DB) {
-        var chirpRequest struct {
-                Body string `json:"body"`
-        }
+	mux.HandleFunc("GET /admin/metrics", apiCfg.handlerMetrics)
 
-        if err := json.NewDecoder(r.Body).Decode(&chirpRequest); err != nil {
-                respondWithError(w, http.StatusBadRequest, "Invalid request payload")
-                return
-        }
+	srv := &http.Server{
+		Addr:    ":" + port,
+		Handler: mux,
+	}
 
-        // Validate the chirp length
-        if len(chirpRequest.Body) > 140 {
-                respondWithError(w, http.StatusBadRequest, "Chirp is too long")
-                return
-        }
-
-        // Clean the chirp from profane words
-        cleanedBody := cleanProfanity(chirpRequest.Body)
-
-        // Create the chirp and save it to the database
-        chirp, err := db.CreateChirp(cleanedBody)
-        if err != nil {
-                respondWithError(w, http.StatusInternalServerError, "Could not save chirp")
-                return
-        }
-
-        // Respond with the created chirp
-        respondWithJSON(w, http.StatusCreated, chirp)
-}
-
-func handleGetChirps(w http.ResponseWriter, r *http.Request, db *database.DB) {
-        chirps, err := db.GetChirps()
-        if err != nil {
-                respondWithError(w, http.StatusInternalServerError, "Could not retrieve chirps")
-                return
-        }
-
-        respondWithJSON(w, http.StatusOK, chirps)
-}
-
-func cleanProfanity(text string) string {
-        words := strings.Split(text, " ")
-        for i, word := range words {
-                for _, profaneWord := range profaneWords {
-                        if strings.ToLower(word) == profaneWord {
-                                words[i] = "****"
-                        }
-                }
-        }
-        return strings.Join(words, " ")
-}
-
-func respondWithError(w http.ResponseWriter, code int, msg string) {
-        respondWithJSON(w, code, map[string]string{"error": msg})
-}
-
-func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
-        response, _ := json.Marshal(payload)
-        w.Header().Set("Content-Type", "application/json")
-        w.WriteHeader(code)
-        w.Write(response)
+	log.Printf("Serving files from %s on port: %s\n", filepathRoot, port)
+	log.Fatal(srv.ListenAndServe())
 }
